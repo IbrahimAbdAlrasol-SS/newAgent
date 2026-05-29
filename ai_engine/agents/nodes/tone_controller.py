@@ -3,8 +3,7 @@ Tone Controller Node.
 
 Post-processes LLM output to enforce tone rules, strip forbidden phrases,
 enforce emoji limits, strip echoed responses, and ensure dialect consistency.
-Runs as a lightweight zero-LLM-cost node between ResponseGenerator and END
-in the pipeline.
+Runs as a lightweight zero-LLM-cost node between ResponseGenerator and END.
 """
 
 import re
@@ -13,48 +12,41 @@ from loguru import logger
 
 from ai_engine.agents.state import ConversationState
 
-# Forbidden opening phrases — these signal "AI bot" to customers
 _FORBIDDEN_STARTS = re.compile(
     r"^\s*("
-    r"تمام[،,!.‌]?\s*|"
-    r"طيب[،,!.‌]?\s*|"
-    r"أكيد[،,!.‌]?\s*|"
-    r"اكيد[،,!.‌]?\s*|"
-    r"بكل سرور[،,!.‌]?\s*|"
-    r"يسعدني[،,!.‌]?\s*|"
-    r"بالتأكيد[،,!.‌]?\s*|"
-    r"بالتاكيد[،,!.‌]?\s*|"
-    r"Sure[،,!.‌]?\s*|"
-    r"Of course[،,!.‌]?\s*|"
-    r"Absolutely[،,!.‌]?\s*|"
-    r"Certainly[،,!.‌]?\s*"
+    r"تمام[،,!.]?\s*|"
+    r"طيب[،,!.]?\s*|"
+    r"أكيد[،,!.]?\s*|"
+    r"اكيد[،,!.]?\s*|"
+    r"بكل سرور[،,!.]?\s*|"
+    r"يسعدني[،,!.]?\s*|"
+    r"بالتأكيد[،,!.]?\s*|"
+    r"بالتاكيد[،,!.]?\s*|"
+    r"Sure[،,!.]?\s*|"
+    r"Of course[،,!.]?\s*|"
+    r"Absolutely[،,!.]?\s*|"
+    r"Certainly[،,!.]?\s*"
     r")",
     re.IGNORECASE | re.UNICODE,
 )
 
-# Emoji pattern to count emoji characters
 _EMOJI_RE = re.compile(
-    r"[\U0001F600-\U0001F64F"     # emoticons
-    r"\U0001F300-\U0001F5FF"       # symbols & pictographs
-    r"\U0001F680-\U0001F6FF"       # transport & map
-    r"\U0001F1E0-\U0001F1FF"       # flags
-    r"\U00002702-\U000027B0"       # dingbats
-    r"\U0000FE00-\U0000FE0F"       # variation selectors
-    r"\U0001F900-\U0001F9FF"       # supplemental symbols
-    r"\U0001FA00-\U0001FA6F"       # chess symbols
-    r"\U0001FA70-\U0001FAFF"       # symbols extended
-    r"\U00002600-\U000026FF"       # misc symbols
+    r"[\U0001F600-\U0001F64F"
+    r"\U0001F300-\U0001F5FF"
+    r"\U0001F680-\U0001F6FF"
+    r"\U0001F1E0-\U0001F1FF"
+    r"\U00002702-\U000027B0"
+    r"\U0000FE00-\U0000FE0F"
+    r"\U0001F900-\U0001F9FF"
+    r"\U0001FA00-\U0001FA6F"
+    r"\U0001FA70-\U0001FAFF"
+    r"\U00002600-\U000026FF"
     r"]",
     re.UNICODE,
 )
 
-# Max emoji allowed in a response
 _MAX_EMOJI = 1
-
-# Max lines in a response (trim beyond this; matches quality gate threshold)
 _MAX_LINES = 6
-
-# Minimum characters for an echo match (avoid stripping legitimate short greetings)
 _MIN_ECHO_CHARS = 15
 
 
@@ -63,19 +55,11 @@ class ToneControllerNode:
 
     @staticmethod
     def _strip_echo(text: str, prev_assistant_contents: list[str]) -> str:
-        """Strip echoed previous assistant messages from the start of text.
-
-        Weak LLMs (e.g. llama-3.1-8b-instant) tend to copy previous assistant
-        messages from conversation history into their new response, creating a
-        snowball effect where each turn prepends all prior replies.  This method
-        detects and removes such echoed prefixes.
-        """
         if not prev_assistant_contents:
             return text
 
         normalized = re.sub(r"\s+", " ", text).strip()
 
-        # Try longest match first to strip the biggest echo
         for prev in sorted(prev_assistant_contents, key=len, reverse=True):
             norm_prev = re.sub(r"\s+", " ", prev).strip()
             if len(norm_prev) < _MIN_ECHO_CHARS:
@@ -83,30 +67,17 @@ class ToneControllerNode:
             if normalized.startswith(norm_prev):
                 remainder = normalized[len(norm_prev):].strip()
                 if remainder:
-                    logger.info(
-                        f"Echo stripped: removed {len(norm_prev)} char prefix "
-                        f"(matched prev assistant message)"
-                    )
+                    logger.info(f"Echo stripped: removed {len(norm_prev)} char prefix")
                     return remainder
         return text
 
     @staticmethod
     def clean(text: str) -> str:
-        """Apply tone rules to raw text and return cleaned version.
-
-        Can be called standalone (e.g. for the streaming path) without
-        needing a full ConversationState.
-        """
         cleaned = text
-
-        # 1. Strip forbidden opening phrases
         cleaned = _FORBIDDEN_STARTS.sub("", cleaned).strip()
-
-        # Guard: if stripping removed all content, keep original
         if not cleaned:
             cleaned = text.strip()
 
-        # 2. Enforce emoji limit — keep first N, remove rest
         emojis_found = _EMOJI_RE.findall(cleaned)
         if len(emojis_found) > _MAX_EMOJI:
             count = 0
@@ -120,19 +91,15 @@ class ToneControllerNode:
                     result.append(ch)
             cleaned = "".join(result)
 
-        # 3. Trim overly long responses (keep first _MAX_LINES lines)
         lines = [l for l in cleaned.split("\n") if l.strip()]
         if len(lines) > _MAX_LINES:
             cleaned = "\n".join(lines[:_MAX_LINES])
             logger.debug(f"ToneController: trimmed from {len(lines)} to {_MAX_LINES} lines")
 
-        # 4. Remove double spaces
         cleaned = re.sub(r"  +", " ", cleaned).strip()
-
         return cleaned
 
     async def __call__(self, state: ConversationState) -> dict:
-        """Clean the last assistant message in-place."""
         passthrough = {"messages": state.messages}
 
         if not state.messages:
@@ -142,26 +109,20 @@ class ToneControllerNode:
         if last_msg.role != "assistant":
             return passthrough
 
-        # Skip deterministic responses (already formatted correctly)
         if last_msg.metadata.get("model") == "deterministic":
             return passthrough
 
         original = last_msg.content
 
-        # 0. Strip echoed previous assistant messages (weak-LLM artifact)
         prev_contents = [
             m.content for m in state.messages[:-1]
             if m.role == "assistant" and m.content
         ]
         cleaned = self._strip_echo(original, prev_contents)
-
-        # 1-4. Apply standard tone rules
         cleaned = self.clean(cleaned)
 
         if cleaned != original:
-            logger.debug(
-                f"ToneController applied: '{original[:60]}...' → '{cleaned[:60]}...'"
-            )
+            logger.debug(f"ToneController applied: '{original[:60]}...' → '{cleaned[:60]}...'")
             messages = list(state.messages)
             messages[-1] = last_msg.model_copy(update={"content": cleaned})
             return {"messages": messages}

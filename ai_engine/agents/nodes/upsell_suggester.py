@@ -2,16 +2,8 @@
 Upsell Suggester Node.
 
 Runs AFTER response_generator and BEFORE tone_controller.
-Appends complementary product suggestions and/or a bundle/AOV nudge
-to the assistant's response when appropriate.
-
-Zero-LLM cost: purely deterministic. Pulls candidate products via
-UpsellService (DB-backed) when a fresh database session is available.
-
-Safe to no-op:
-  - When no selected_product / order items present
-  - When response is empty
-  - When DB session not provided (degrades silently)
+Appends complementary product suggestions to the assistant's response
+when appropriate. Zero-LLM cost: purely deterministic.
 """
 
 from __future__ import annotations
@@ -22,8 +14,6 @@ from loguru import logger
 
 from ai_engine.agents.state import ConversationState, IntentType
 
-
-# Intents where upsell is appropriate
 _UPSELL_INTENTS = {
     IntentType.PRODUCT_SELECTION,
     IntentType.PRODUCT_INQUIRY,
@@ -31,7 +21,6 @@ _UPSELL_INTENTS = {
     IntentType.PRICE_CHECK,
 }
 
-# Don't upsell if response already contains these markers
 _SKIP_MARKERS = (
     "وممكن يعجبك",
     "🎁 عرض خاص",
@@ -41,14 +30,6 @@ _SKIP_MARKERS = (
 
 
 class UpsellSuggesterNode:
-    """
-    Append cross-sell + bundle suggestions to the generated response.
-
-    The node depends on a ``session_factory`` callable (returning an
-    AsyncSession context manager) so it stays decoupled from FastAPI DI.
-    If no factory is provided, the node is a no-op.
-    """
-
     def __init__(self, session_factory=None):
         self.session_factory = session_factory
 
@@ -61,7 +42,6 @@ class UpsellSuggesterNode:
             return passthrough
 
     async def _run(self, state: ConversationState, passthrough: dict[str, Any]) -> dict[str, Any]:
-        # Skip if no response yet, or order already confirmed/cancelled
         messages = state.messages or []
         if not messages or messages[-1].role != "assistant":
             return passthrough
@@ -83,16 +63,16 @@ class UpsellSuggesterNode:
         currency_symbol = (state.currency or "").upper()
         appendix_parts: list[str] = []
 
-        # ── Bundle / AOV boost ────────────────────────────────────────────
         items = slots.all_items if slots else []
         if len(items) >= 2:
-            from app.services.upsell_service import UpsellService
-            bundle = UpsellService.suggest_bundle(items, currency_symbol=currency_symbol)
-            if bundle and bundle.get("applicable"):
-                appendix_parts.append(bundle["message_ar"])
+            try:
+                from app.services.upsell_service import UpsellService
+                bundle = UpsellService.suggest_bundle(items, currency_symbol=currency_symbol)
+                if bundle and bundle.get("applicable"):
+                    appendix_parts.append(bundle["message_ar"])
+            except Exception:
+                pass
 
-        # ── Cross-sell / Complementary products ───────────────────────────
-        # Only when we have a selected product AND no bundle was added
         selected = state.selected_product
         if not appendix_parts and selected and self.session_factory:
             suggestion = await self._build_cross_sell(state, selected, currency_symbol)
@@ -102,18 +82,12 @@ class UpsellSuggesterNode:
         if not appendix_parts:
             return passthrough
 
-        # Append to last assistant message
         new_content = response_text.rstrip() + "\n\n" + "\n".join(appendix_parts)
         new_messages = list(messages)
         new_messages[-1] = new_messages[-1].model_copy(update={"content": new_content})
         return {"messages": new_messages}
 
-    async def _build_cross_sell(
-        self,
-        state: ConversationState,
-        selected: dict,
-        currency_symbol: str,
-    ) -> str | None:
+    async def _build_cross_sell(self, state, selected, currency_symbol) -> str | None:
         try:
             from app.services.upsell_service import UpsellService
             from uuid import UUID
