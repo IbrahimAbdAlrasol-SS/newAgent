@@ -287,16 +287,6 @@ def run_pipeline(
     """
     Run BOC validation Stages 2, 4, 5, 6, 8 on a draft response.
     Returns: {ok, failed_stages, rewrite, banned, manipulation}
-    Stage 1 (hallucination) and Stage 3 (tone) stay in QualityGate / existing logic.
-
-    Semantics:
-    - banned phrases:  1 hit  → soft (rewrite by stripping), non-fatal
-                       ≥2 hit → hard fail (force regenerate)
-    - manipulation:    any hit → hard fail
-    - state compliance / verbosity over 2x → hard fail
-    - verbosity over 1.3x cap → soft (rewrite="compress" signal)
-    - CTA forbidden in state → soft (rewrite stripped CTA, non-fatal)
-    `rewrite` is always applied by caller when present, regardless of `ok`.
     """
     result: dict = {
         "ok": True,
@@ -315,7 +305,6 @@ def run_pipeline(
             result["failed_stages"].append("banned_phrases")
             result["ok"] = False
         else:
-            # Single hit → soft rewrite
             result["failed_stages"].append("banned_phrases:soft")
             current = remove_banned_phrases(current, banned)
             result["rewrite"] = current
@@ -338,9 +327,7 @@ def run_pipeline(
     if not vb.ok:
         result["failed_stages"].append(f"verbosity:{vb.reason}")
         if vb.suggested_rewrite == "compress":
-            # soft signal; let LLM compress on retry
             if "verbosity:over_cap_2x" not in ",".join(result["failed_stages"]):
-                # not the 2x case → keep non-fatal but flag for compress
                 result.setdefault("rewrite_hint", "compress")
         else:
             result["ok"] = False

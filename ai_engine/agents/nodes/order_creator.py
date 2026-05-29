@@ -2,8 +2,7 @@
 Order Creator Node.
 
 Pure state transformer that prepares reservation data when all OrderSlots
-are filled. Does NOT access the database directly — the backend
-ConversationService handles persistence after receiving the reservation_data.
+are filled. Does NOT access the database directly.
 """
 
 from __future__ import annotations
@@ -18,35 +17,16 @@ from ai_engine.analytics.metrics import ORDER_CREATED_COUNTER
 
 
 def _generate_idempotency_key(slots: OrderSlots, tenant_id: str) -> str:
-    """
-    Generate a short idempotency key for the order.
-
-    Uses a 1-minute bucket to deduplicate retries/concurrent requests
-    without blocking legitimate repeat orders in separate sessions.
-    """
     minute_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
     raw = f"{tenant_id}:{slots.product_id}:{slots.customer_phone}:{minute_bucket}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class OrderCreatorNode:
-    """
-    Prepare order data from completed OrderSlots.
-
-    When all required slots (product, customer name, phone) are filled,
-    this node builds a `reservation_data` dict that the backend
-    ConversationService uses to create the actual DB reservation.
-
-    Usage:
-        order_creator = OrderCreatorNode()
-        # In graph: slot_filler → [if complete] → order_creator → response
-    """
-
     def __init__(self):
         logger.info("Initialized OrderCreatorNode")
 
     async def __call__(self, state: ConversationState) -> dict:
-        """Build reservation_data if slots are complete, otherwise pass through."""
         slots = state.order_slots
         if not slots or not slots.is_complete:
             logger.debug("Order slots incomplete — skipping order creation")
@@ -65,13 +45,13 @@ class OrderCreatorNode:
                 from uuid import UUID
 
                 product_ids = [UUID(str(item.product_id)) for item in slots.all_items if item.product_id]
-                
+
                 if product_ids:
                     async with AsyncSessionLocal() as session:
                         stmt = select(Product.id, Product.stock_quantity).where(Product.id.in_(product_ids))
                         rows = (await session.execute(stmt)).all()
                         live_stock = {str(r.id): r.stock_quantity for r in rows}
-                        
+
                         for item in slots.all_items:
                             if item.product_id in live_stock:
                                 current_stock = live_stock[item.product_id]
@@ -96,10 +76,8 @@ class OrderCreatorNode:
                 f"phone={slots.customer_phone}, idempotency_key={idempotency_key}"
             )
 
-            # Mark slots as confirmed
             updated_slots = slots.model_copy(update={"confirmed": True})
 
-            # Build typed PendingOrder then serialize for backend compat
             pending_order = PendingOrder(
                 status="ready",
                 idempotency_key=idempotency_key,
@@ -131,7 +109,6 @@ class OrderCreatorNode:
             }
 
     def _build_order_data(self, slots: OrderSlots) -> dict:
-        """Build structured order data from filled slots (supports multi-product)."""
         items = []
         for item in slots.all_items:
             items.append({
